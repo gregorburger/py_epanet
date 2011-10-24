@@ -1,0 +1,6 @@
+python based implementation of EPAnet, EPA's water distribution modeling tool. 
+
+currently WIP
+
+try:
+$ python src/epanet.py data/Net1.inp
