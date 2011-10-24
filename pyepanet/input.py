@@ -21,10 +21,14 @@
 import sys
 import os
 
+STAT_RANGE = "RANGE"
+STAT_MAXIMUM = "MAXIMUM"
+STAT_MINIMAL = "MINIMUM"
+STAT_AVERAGED = "AVERAGED"
+STAT_NONE = "NONE"
+
 HLOSS_CM = "C-M"
-
 HLOSS_DW = "D-W"
-
 HLOSS_HW = "H-W"
 
 OPTIONS = 'OPTIONS'
@@ -99,9 +103,126 @@ def process_kv_section(section, line, data):
 def process_demands(section, line, data):
     pass
 
+STATISTICS = [STAT_NONE,
+              STAT_AVERAGED,
+              STAT_MINIMAL,
+              STAT_MAXIMUM,
+              STAT_RANGE]
+
+class TimeSection:
+    def __init__(self):
+        self.duration = 0
+        self.hydraulic_timestep = 60*60 #one hour in seconds
+        self.quality_timestep = self.hydraulic_timestep/10
+        self.rule_timestep = self.hydraulic_timestep/10
+        self.pattern_timestep = 60*60
+        self.report_timestep = 60*60
+        self.report_start = 0
+        self.start_clocktime = "12:00 AM"
+        self.statistic = STAT_NONE
+
+    def __str__(self):
+        return "\n".join("%s = %s" % (key, self.__dict__[key]) for key in self.__dict__)
+        
+
+time_multipliers = {"SEC": 1,
+                    "MIN": 60,
+                    "HOURS": 60*60,
+                    "DAYS": 24*60*60}
+
+def to_seconds(time_spec):
+    if len(time_spec) == 2:
+        assert(time_spec[1] in time_multipliers)
+        return int(time_spec[0])*time_multipliers[time_spec[1]]
+
+    #len == 1 means either hh:mm or
+
+    items = time_spec[0].split(":")
+
+    if len(items) == 2:
+        return int(items[0])*60*60 + int(items[1])*60
+
+    #sing entry default unit HOURS
+
+    return int(time_spec[0])*time_multipliers["HOURS"]
+
 
 def process_times(section, line, data):
-    pass
+    if section not in data:
+        data[section] = TimeSection()
+
+    time_section = data[section]
+
+    items = line.strip().split()
+
+    #single worded time values IDIAT!
+    if "DURATION".startswith(items[0].upper()):
+        time_section.duration = to_seconds(items[1:])
+        return
+
+    if "STATISTIC".startswith(items[0].upper()):
+        assert(len(items) == 2)
+        stat_type = items[1]
+        assert(stat_type.upper() in STATISTICS)
+        time_section.statistic = stat_type.upper()
+        return
+
+    #known to be two worded time values IDIAT!
+
+    two_worded = "%s %s" % (items[0].upper(), items[1].upper())
+
+    if "PATTERN TIMESTEP".startswith(two_worded):
+        time_section.pattern_timestep = to_seconds(items[2:])
+        return
+
+    if "PATTERN START".startswith(two_worded):
+        time_section.pattern_start = to_seconds(items[2:])
+        return
+
+    if "REPORT TIMESTEP".startswith(two_worded):
+        time_section.report_timestep = to_seconds(items[2:])
+        return
+
+    if "REPORT START".startswith(two_worded):
+        time_section.report_start = to_seconds(items[2:])
+        return
+
+    #could be single or double worded IDIAT!
+    optionals = ["HYDRAULIC TIMESTEP",
+                 "QUALITY TIMESTEP",
+                 "RULE TIMESTEP",
+                 "START CLOCKTIME"]
+
+    assert(not items[1].isalpha() or not items[2].isalpha())
+    key = ""
+    value = ""
+    if items[1].isdigit():
+        key = items[0].upper()
+        value = items[1:]
+    else:
+        key = "%s %s" % (items[0].upper(), items[1].upper())
+        value = items[2:]
+
+    assert(key != "")
+    assert(value != "")
+
+    for opt in optionals:
+        if not opt.startswith(key):
+            continue
+        print "in optional times setting %s to %s", (key, value)
+        timesec_member = opt.lower().replace(" ", "_")
+        if opt == "START CLOCKTIME":
+            assert(value[1].upper() in ["AM", "PM"])
+            time_section.__dict__[timesec_member] = (int(value[0]), value[1].upper())
+            return
+        time_section.__dict__[timesec_member] = to_seconds(value)
+        return
+
+    print "unknown times entry %s" % line
+    exit(-1)
+
+
+        
 
 class PumpSectionEntry:
     def __init__(self, line):
@@ -272,3 +393,4 @@ if __name__ == "__main__":
     for j in data[JUNCTIONS]:
         print "%s %s %s" % (j.ID, j.Elevation, j.Demand)
 
+    print data["TIMES"]
