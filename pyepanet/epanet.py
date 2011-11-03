@@ -59,6 +59,8 @@ class Link:
         self.r = self.resistance() #resistance coefficient from table 3.1 epanet manual
         self.id_headloss = None
         self.flow_correction_factor = None
+        self.upper_matrix_offset = None  #direct offset into csr data array
+        self.lower_matrix_offset = None  #direct offset into csr data array
 
     def update(self, Q):
         raise NotImplemented
@@ -229,6 +231,7 @@ class Node():
         self.demand = 0.0
         self.initial_level = 0.0 #overwritten by tank and reservoir
         self.closed = False
+        self.matrix_offset = None  #direct offset into csr data array
 
 
 class Junction(Node):
@@ -277,6 +280,7 @@ class EPAnet():
     def __init__(self, input_file):
         self.__parse_input(input_file)
         self.__init_arrays()
+        self.__init_matrix_offsets()
 
     def step(self):
         """
@@ -378,22 +382,80 @@ class EPAnet():
         #njuncs = len(self.junctions)
         #self.A = sparse.csc_matrix((njuncs,njuncs))
 
+    def __init_matrix_offsets(self):
+        njuncs = len(self.junctions)
+        matrix = sparse.lil_matrix((njuncs,njuncs))
+        for link in self.links:
+            n1 = link.node1
+            n2 = link.node2
+
+            n1junc = isinstance(n1, Junction)
+            n2junc = isinstance(n2, Junction)
+
+            if n1junc and n2junc:
+                matrix[n1.idx, n2.idx] = 1.0
+                matrix[n2.idx, n1.idx] = 1.0
+            if n1junc:
+                matrix[n1.idx, n1.idx] = 1.0
+            if n2junc:
+                matrix[n2.idx, n2.idx] = 1.0
+
+        self.A = matrix.tocsr()
+
+        for link in self.links:
+            n1 = link.node1
+            n2 = link.node2
+
+            n1junc = isinstance(n1, Junction)
+            n2junc = isinstance(n2, Junction)
+
+            if n1junc and n2junc:
+                upper_found, lower_found = (False, False)
+                for c in range(self.A.indptr[n1.idx], self.A.indptr[n1.idx+1]):
+                    if self.A.indices[c] == n2.idx:
+                        upper_found = True
+                        link.upper_matrix_offset = c
+
+                for c in range(self.A.indptr[n2.idx], self.A.indptr[n2.idx+1]):
+                    if self.A.indices[c] == n1.idx:
+                        lower_found = True
+                        link.lower_matrix_offset = c
+
+                assert(upper_found and lower_found)
+
+            if n1junc:
+                found = False
+                for c in range(self.A.indptr[n1.idx], self.A.indptr[n1.idx+1]):
+                    if self.A.indices[c] == n1.idx:
+                        n1.matrix_offset = c
+                        found = True
+                assert found
+
+            if n2junc:
+                found = False
+                for c in range(self.A.indptr[n2.idx], self.A.indptr[n2.idx+1]):
+                    if self.A.indices[c] == n2.idx:
+                        n2.matrix_offset = c
+                        found = True
+                assert found
+            self.A.data.fill(0.0)
+
     def __new_coefficients(self):
         n = len(self.nodes.values())
         njuncs = len(self.junctions)
-        A = sparse.lil_matrix((njuncs,njuncs))
 
         self.F.fill(0.0)
         self.X.fill(0.0)
         self.P.fill(0.0)
         self.Y.fill(0.0)
+        self.A.data.fill(0.0)
 
-        self.__new_link_coefficients(A, self.X, self.F)
+        self.__new_link_coefficients(self.A, self.X, self.F)
         self.__new_emitter_coefficients()
         self.__new_node_coefficients(self.X, self.F)
         self.__new_valve_coefficients()
 
-        return (A, self.F)
+        return (self.A, self.F)
 
 
     def __new_link_coefficients(self, A, X, F):
@@ -417,18 +479,18 @@ class EPAnet():
             n2junc = isinstance(n2, Junction)
 
             if n1junc and n2junc:
-                A[n1.idx, n2.idx] -= self.P[i]
-                A[n2.idx, n1.idx] -= self.P[i]
+                A.data[link.upper_matrix_offset] -= self.P[i]
+                A.data[link.lower_matrix_offset] -= self.P[i]
 
             if n1junc:
-                A[n1.idx, n1.idx] += self.P[i]
+                A.data[n1.matrix_offset] += self.P[i]
                 F[n1.idx] += self.Y[i]
             else:
                 F[n2.idx] += self.P[i]*self.H[n1.idx]
 
 
             if n2junc:
-                A[n2.idx, n2.idx] += self.P[i]
+                A.data[n2.matrix_offset] += self.P[i]
                 F[n2.idx] -= self.Y[i]
             else:
                 F[n1.idx] += self.P[i]*self.H[n2.idx]
@@ -449,16 +511,7 @@ class EPAnet():
 
     def __solve(self, A, F):
         njuncs = len(self.junctions)
-        #for f in F[:njuncs]:
-        #    print "%30.13f" % f
-        #B = A.copy()
-        #B.resize((njuncs, njuncs))
-        #coo = B.tocoo()
-        #i, j, v = coo.row, coo.col, coo.data
-        #for t in sorted(zip(j, i, v), key=lambda tup: (tup[1], tup[0])):
-        #    print "(%d,%d) %30.13f" % t
-
-        self.H[0:njuncs] = splinalg.spsolve(A.tocsc(), F[:njuncs])
+        self.H[0:njuncs] = splinalg.spsolve(A, F[:njuncs])
 
     def __new_flows(self):
 
